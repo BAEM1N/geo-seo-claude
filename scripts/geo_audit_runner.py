@@ -426,6 +426,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run a local GEO audit")
     parser.add_argument("url", help="Target URL or domain")
     parser.add_argument("--mode", choices=["quick", "full"], default="quick")
+    render_group = parser.add_mutually_exclusive_group()
+    render_group.add_argument(
+        "--rendered",
+        action="store_true",
+        help="Use Playwright-rendered DOM inspection (default)",
+    )
     parser.add_argument(
         "--raw",
         action="store_true",
@@ -442,7 +448,7 @@ def main() -> int:
     url = normalize_url(args.url)
     outdir = Path(args.outdir).expanduser()
     outdir.mkdir(parents=True, exist_ok=True)
-    use_rendered = not args.raw
+    use_rendered = True if args.rendered else not args.raw
 
     homepage = fetch_page(url, rendered=use_rendered)
     homepage_summary = summarize_page(homepage)

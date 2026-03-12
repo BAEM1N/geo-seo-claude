@@ -31,23 +31,36 @@
 ### One-Command Install (macOS/Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zubair-trabzada/geo-seo-claude/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/BAEM1N/geo-seo-claude/main/install.sh | bash
 ```
 
 ### Manual Install
 
 ```bash
-git clone https://github.com/zubair-trabzada/geo-seo-claude.git
+git clone https://github.com/BAEM1N/geo-seo-claude.git
 cd geo-seo-claude
 ./install.sh
 ```
 
 ### Requirements
 
-- Python 3.8+
+- Python 3.11+ recommended for the uv-managed local audit runner
 - Claude Code CLI
 - Git
 - Optional: Playwright (for screenshots)
+
+### Local uv Workflow
+
+For local GEO/SEO auditing outside Claude Code:
+
+```bash
+git clone https://github.com/BAEM1N/geo-seo-claude.git
+cd geo-seo-claude
+uv sync
+uv run python scripts/geo_audit_runner.py https://example.com --mode full --rendered
+```
+
+Use `--rendered` (Playwright) for modern docs sites or SPAs where schema, author signals, and final DOM content may appear after client-side rendering. Use `--raw` when you want a plain HTTP-fetch baseline.
 
 ---
 
@@ -69,6 +82,18 @@ Open Claude Code and use these commands:
 | `/geo content <url>` | Content quality & E-E-A-T assessment |
 | `/geo report <url>` | Generate client-ready GEO report |
 | `/geo report-pdf` | Generate professional PDF report with charts & visualizations |
+
+### Local audit runner modes
+
+The repo also includes a local audit runner for uv/Codex workflows:
+
+```bash
+# Rendered DOM inspection with Playwright (recommended)
+uv run python scripts/geo_audit_runner.py https://example.com --mode full --rendered
+
+# Raw HTTP fetch only
+uv run python scripts/geo_audit_runner.py https://example.com --mode full --raw
+```
 
 ---
 
@@ -101,6 +126,7 @@ geo-seo-claude/
 │   ├── citability_scorer.py      # AI citability scoring engine
 │   ├── brand_scanner.py          # Brand mention detection
 │   ├── llmstxt_generator.py      # llms.txt validation & generation
+│   ├── geo_audit_runner.py       # Local GEO audit orchestrator (raw/rendered modes)
 │   └── generate_pdf_report.py    # PDF report generator (ReportLab)
 ├── schema/                       # JSON-LD templates
 │   ├── organization.json         # Organization schema (with sameAs)
