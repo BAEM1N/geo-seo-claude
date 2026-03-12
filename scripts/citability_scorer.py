@@ -12,6 +12,7 @@ Based on research showing optimal AI-cited passages are:
 
 import sys
 import json
+import os
 import re
 from typing import Optional
 
@@ -21,6 +22,12 @@ try:
 except ImportError:
     print("ERROR: Required packages not installed. Run: pip install requests beautifulsoup4")
     sys.exit(1)
+
+try:
+    from fetch_page import fetch_rendered_html, should_use_rendered_dom
+except ImportError:
+    fetch_rendered_html = None
+    should_use_rendered_dom = None
 
 
 def score_passage(text: str, heading: Optional[str] = None) -> dict:
@@ -244,21 +251,28 @@ def score_passage(text: str, heading: Optional[str] = None) -> dict:
     }
 
 
-def analyze_page_citability(url: str) -> dict:
+def analyze_page_citability(url: str, rendered: bool | None = None) -> dict:
     """Analyze all content blocks on a page for citability."""
     try:
-        response = requests.get(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
-            },
-            timeout=30,
+        use_rendered = (
+            should_use_rendered_dom(default=False) if rendered is None and should_use_rendered_dom else bool(rendered)
         )
-        response.raise_for_status()
+        if use_rendered and fetch_rendered_html is not None:
+            page_html = fetch_rendered_html(url, timeout=30)["html"]
+        else:
+            response = requests.get(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+                },
+                timeout=30,
+            )
+            response.raise_for_status()
+            page_html = response.text
     except Exception as e:
         return {"error": f"Failed to fetch page: {str(e)}"}
 
-    soup = BeautifulSoup(response.text, "lxml")
+    soup = BeautifulSoup(page_html, "lxml")
 
     # Remove non-content elements
     for element in soup.find_all(
@@ -339,5 +353,6 @@ if __name__ == "__main__":
         sys.exit(1)
 
     url = sys.argv[1]
-    result = analyze_page_citability(url)
+    rendered = os.getenv("GEO_RENDERED", "").strip().lower() not in {"", "0", "false", "no", "off"}
+    result = analyze_page_citability(url, rendered=rendered)
     print(json.dumps(result, indent=2, default=str))

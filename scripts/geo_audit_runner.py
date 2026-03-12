@@ -427,6 +427,11 @@ def main() -> int:
     parser.add_argument("url", help="Target URL or domain")
     parser.add_argument("--mode", choices=["quick", "full"], default="quick")
     parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Disable Playwright rendered-DOM inspection and use raw HTTP fetch only",
+    )
+    parser.add_argument(
         "--outdir",
         default=str(Path.home() / "Outputs" / "reports"),
         help="Directory for generated JSON/Markdown reports",
@@ -437,8 +442,9 @@ def main() -> int:
     url = normalize_url(args.url)
     outdir = Path(args.outdir).expanduser()
     outdir.mkdir(parents=True, exist_ok=True)
+    use_rendered = not args.raw
 
-    homepage = fetch_page(url)
+    homepage = fetch_page(url, rendered=use_rendered)
     homepage_summary = summarize_page(homepage)
     brand_name = infer_brand_name(url, homepage)
     robots = fetch_robots_txt(url)
@@ -459,12 +465,12 @@ def main() -> int:
     top_citable_blocks = []
 
     for sample_url in sampled_urls:
-        page = homepage if sample_url == url else fetch_page(sample_url)
+        page = homepage if sample_url == url else fetch_page(sample_url, rendered=use_rendered)
         summary = summarize_page(page)
         page_summaries.append(summary)
         eeat_signals_by_page.append(eeat_signals(page))
 
-        citability = analyze_page_citability(sample_url)
+        citability = analyze_page_citability(sample_url, rendered=use_rendered)
         citability_results.append(citability)
         top_citable_blocks.extend(citability.get("top_5_citable", []))
 
@@ -500,6 +506,7 @@ def main() -> int:
         "brand_name": brand_name,
         "audit_date": audit_date,
         "mode": args.mode,
+        "render_mode": "rendered" if use_rendered else "raw",
         "sample_page_count": len(sampled_urls),
         "scores": scores,
         "homepage": homepage_summary,

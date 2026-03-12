@@ -6,6 +6,7 @@ Extracts HTML, text content, meta tags, headers, and structured data.
 
 import sys
 import json
+import os
 import re
 from urllib.parse import urljoin, urlparse
 from typing import Optional
@@ -16,6 +17,13 @@ try:
 except ImportError:
     print("ERROR: Required packages not installed. Run: pip install requests beautifulsoup4")
     sys.exit(1)
+
+try:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    sync_playwright = None
+    PlaywrightTimeoutError = Exception
 
 # Common AI crawler user agents for testing
 AI_CRAWLERS = {
@@ -34,7 +42,131 @@ DEFAULT_HEADERS = {
 }
 
 
-def fetch_page(url: str, timeout: int = 30) -> dict:
+def should_use_rendered_dom(default: bool = False) -> bool:
+    value = os.getenv("GEO_RENDERED", "")
+    if not value:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def fetch_rendered_html(url: str, timeout: int = 30) -> dict:
+    """Fetch a page with Playwright and return the rendered DOM."""
+    if sync_playwright is None:
+        raise RuntimeError("Playwright is not installed")
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, wait_until="networkidle", timeout=timeout * 1000)
+            rendered = {
+                "url": page.url,
+                "title": page.title(),
+                "html": page.content(),
+            }
+            browser.close()
+            return rendered
+    except PlaywrightTimeoutError as exc:
+        raise RuntimeError(f"Playwright timeout after {timeout} seconds") from exc
+
+
+def extract_page_data_from_html(source_html: str, page_url: str) -> dict:
+    """Parse HTML and extract page-level metadata."""
+    parsed = {
+        "meta_tags": {},
+        "title": None,
+        "description": None,
+        "canonical": None,
+        "h1_tags": [],
+        "heading_structure": [],
+        "word_count": 0,
+        "text_content": "",
+        "internal_links": [],
+        "external_links": [],
+        "images": [],
+        "structured_data": [],
+        "has_ssr_content": True,
+        "errors": [],
+    }
+
+    soup = BeautifulSoup(source_html, "lxml")
+
+    title_tag = soup.find("title")
+    parsed["title"] = title_tag.get_text(strip=True) if title_tag else None
+
+    for meta in soup.find_all("meta"):
+        name = meta.get("name", meta.get("property", ""))
+        content = meta.get("content", "")
+        if name and content:
+            parsed["meta_tags"][name.lower()] = content
+            if name.lower() == "description":
+                parsed["description"] = content
+
+    canonical = soup.find("link", rel="canonical")
+    parsed["canonical"] = canonical.get("href") if canonical else None
+
+    for level in range(1, 7):
+        for heading in soup.find_all(f"h{level}"):
+            text = heading.get_text(strip=True)
+            parsed["heading_structure"].append({"level": level, "text": text})
+            if level == 1:
+                parsed["h1_tags"].append(text)
+
+    for element in soup.find_all(["script", "style", "nav", "footer", "header"]):
+        element.decompose()
+    text = soup.get_text(separator=" ", strip=True)
+    parsed["text_content"] = text
+    parsed["word_count"] = len(text.split())
+
+    parsed_url = urlparse(page_url)
+    base_domain = parsed_url.netloc
+    for link in soup.find_all("a", href=True):
+        href = urljoin(page_url, link["href"])
+        link_text = link.get_text(strip=True)
+        parsed_href = urlparse(href)
+        if parsed_href.netloc == base_domain:
+            parsed["internal_links"].append({"url": href, "text": link_text})
+        elif parsed_href.scheme in ("http", "https"):
+            parsed["external_links"].append({"url": href, "text": link_text})
+
+    for img in soup.find_all("img"):
+        parsed["images"].append(
+            {
+                "src": img.get("src", ""),
+                "alt": img.get("alt", ""),
+                "width": img.get("width"),
+                "height": img.get("height"),
+                "loading": img.get("loading"),
+            }
+        )
+
+    for script in BeautifulSoup(source_html, "lxml").find_all(
+        "script", type="application/ld+json"
+    ):
+        try:
+            payload = script.string or script.get_text(strip=True)
+            if not payload:
+                continue
+            parsed["structured_data"].append(json.loads(payload))
+        except (json.JSONDecodeError, TypeError):
+            parsed["errors"].append("Invalid JSON-LD detected")
+
+    js_app_roots = BeautifulSoup(source_html, "lxml").find_all(
+        id=re.compile(r"(app|root|__next|__nuxt)", re.I)
+    )
+    if js_app_roots:
+        for root in js_app_roots:
+            inner_text = root.get_text(strip=True)
+            if len(inner_text) < 50:
+                parsed["has_ssr_content"] = False
+                parsed["errors"].append(
+                    f"Possible client-side only rendering detected: #{root.get('id', 'unknown')} has minimal server-rendered content"
+                )
+
+    return parsed
+
+
+def fetch_page(url: str, timeout: int = 30, rendered: bool | None = None) -> dict:
     """Fetch a page and return structured analysis data."""
     result = {
         "url": url,
@@ -56,6 +188,7 @@ def fetch_page(url: str, timeout: int = 30) -> dict:
         "has_ssr_content": True,
         "security_headers": {},
         "errors": [],
+        "render_mode": "raw",
     }
 
     try:
@@ -87,89 +220,24 @@ def fetch_page(url: str, timeout: int = 30) -> dict:
         for header in security_headers:
             result["security_headers"][header] = response.headers.get(header, None)
 
-        # Parse HTML
-        soup = BeautifulSoup(response.text, "lxml")
-
-        # Title
-        title_tag = soup.find("title")
-        result["title"] = title_tag.get_text(strip=True) if title_tag else None
-
-        # Meta tags
-        for meta in soup.find_all("meta"):
-            name = meta.get("name", meta.get("property", ""))
-            content = meta.get("content", "")
-            if name and content:
-                result["meta_tags"][name.lower()] = content
-                if name.lower() == "description":
-                    result["description"] = content
-
-        # Canonical
-        canonical = soup.find("link", rel="canonical")
-        result["canonical"] = canonical.get("href") if canonical else None
-
-        # Headings
-        for level in range(1, 7):
-            for heading in soup.find_all(f"h{level}"):
-                text = heading.get_text(strip=True)
-                result["heading_structure"].append({"level": level, "text": text})
-                if level == 1:
-                    result["h1_tags"].append(text)
-
-        # Text content
-        for element in soup.find_all(["script", "style", "nav", "footer", "header"]):
-            element.decompose()
-        text = soup.get_text(separator=" ", strip=True)
-        result["text_content"] = text
-        result["word_count"] = len(text.split())
-
-        # Links
-        parsed_url = urlparse(url)
-        base_domain = parsed_url.netloc
-        for link in soup.find_all("a", href=True):
-            href = urljoin(url, link["href"])
-            link_text = link.get_text(strip=True)
-            parsed_href = urlparse(href)
-            if parsed_href.netloc == base_domain:
-                result["internal_links"].append({"url": href, "text": link_text})
-            elif parsed_href.scheme in ("http", "https"):
-                result["external_links"].append({"url": href, "text": link_text})
-
-        # Images
-        for img in soup.find_all("img"):
-            img_data = {
-                "src": img.get("src", ""),
-                "alt": img.get("alt", ""),
-                "width": img.get("width"),
-                "height": img.get("height"),
-                "loading": img.get("loading"),
-            }
-            result["images"].append(img_data)
-
-        # Structured data (JSON-LD)
-        for script in BeautifulSoup(response.text, "lxml").find_all(
-            "script", type="application/ld+json"
-        ):
+        use_rendered = should_use_rendered_dom(default=False) if rendered is None else rendered
+        source_html = response.text
+        parse_url = response.url
+        if use_rendered:
             try:
-                data = json.loads(script.string)
-                result["structured_data"].append(data)
-            except (json.JSONDecodeError, TypeError):
-                result["errors"].append("Invalid JSON-LD detected")
+                rendered_payload = fetch_rendered_html(response.url, timeout=timeout)
+                source_html = rendered_payload["html"]
+                parse_url = rendered_payload["url"] or response.url
+                result["render_mode"] = "rendered"
+            except Exception as exc:
+                result["errors"].append(f"Rendered DOM fetch failed: {exc}")
 
-        # SSR check — look for signs of client-side only rendering
-        noscript_tags = BeautifulSoup(response.text, "lxml").find_all("noscript")
-        js_app_roots = BeautifulSoup(response.text, "lxml").find_all(
-            id=re.compile(r"(app|root|__next|__nuxt)", re.I)
-        )
-
-        if js_app_roots:
-            # Check if the app root has meaningful content
-            for root in js_app_roots:
-                inner_text = root.get_text(strip=True)
-                if len(inner_text) < 50:
-                    result["has_ssr_content"] = False
-                    result["errors"].append(
-                        f"Possible client-side only rendering detected: #{root.get('id', 'unknown')} has minimal server-rendered content"
-                    )
+        parsed = extract_page_data_from_html(source_html, parse_url)
+        for key, value in parsed.items():
+            if key == "errors":
+                result["errors"].extend(value)
+            else:
+                result[key] = value
 
     except requests.exceptions.Timeout:
         result["errors"].append(f"Timeout after {timeout} seconds")
@@ -446,9 +514,10 @@ if __name__ == "__main__":
 
     target_url = sys.argv[1]
     mode = sys.argv[2] if len(sys.argv) > 2 else "page"
+    rendered = should_use_rendered_dom(default=False)
 
     if mode == "page":
-        data = fetch_page(target_url)
+        data = fetch_page(target_url, rendered=rendered)
     elif mode == "robots":
         data = fetch_robots_txt(target_url)
     elif mode == "llms":
@@ -461,7 +530,7 @@ if __name__ == "__main__":
         data = extract_content_blocks(response.text)
     elif mode == "full":
         data = {
-            "page": fetch_page(target_url),
+            "page": fetch_page(target_url, rendered=rendered),
             "robots": fetch_robots_txt(target_url),
             "llms": fetch_llms_txt(target_url),
             "sitemap": crawl_sitemap(target_url),
